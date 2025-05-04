@@ -147,32 +147,121 @@ class LeafNode extends BPlusNode {
     @Override
     public LeafNode get(DataBox key) {
         // TODO(proj2): implement
-
-        return null;
+       return this;
     }
 
     // See BPlusNode.getLeftmostLeaf.
     @Override
     public LeafNode getLeftmostLeaf() {
         // TODO(proj2): implement
-
-        return null;
+        // leafNode can return immediately
+        return this;
     }
 
     // See BPlusNode.put.
     @Override
     public Optional<Pair<DataBox, Long>> put(DataBox key, RecordId rid) {
         // TODO(proj2): implement
+        if (getKey(key).isPresent()) {
+            String msg = String.format("B+ tree does not allow duplicate keys: %s", key);
+            throw new BPlusTreeException(msg);
+        }
 
-        return Optional.empty();
+        int order = metadata.getOrder();
+        int count = InnerNode.numLessThan(key, keys);
+        keys.add(count, key);
+        rids.add(count, rid);
+
+        // don't need to split
+        if (2 * order >= keys.size()) {
+            sync();
+            return Optional.empty();
+        }
+
+        // need to split, right
+        List<DataBox> leftKeys = keys.subList(0, order);
+        List<DataBox> rightKeys = keys.subList(order, order * 2 + 1);
+        List<RecordId> leftRids = rids.subList(0, order);
+        List<RecordId> rightRids = rids.subList(order, order * 2 + 1);
+        LeafNode newNode = new LeafNode(metadata, bufferManager, rightKeys, rightRids, rightSibling, treeContext);
+        long pageNum = newNode.getPage().getPageNum();
+
+        // need to split, left
+        this.keys = leftKeys;
+        this.rids = leftRids;
+        this.rightSibling = Optional.of(pageNum);
+        sync();
+        return Optional.of(new Pair<>(rightKeys.get(0), pageNum));
     }
 
+    /**
+     * The fillFactor is only used in leafNode, usually B+ tree's max is
+     * 2 * d + 1(need to split), but there we use fillFactor. This can reduce
+     * memory consume and building speed.
+     * It's working tenet(原理):
+     * ex d is 5, the max capacity is 10, fillFactor is 0.75, ceil(0.75 * 5 * 2)
+     * is 8, so the current capacity is 8, when leafNode over 8 nodes, we need to
+     * split(or bulk load) the tree.
+     * There are two conditions:
+     * Leaf nodes do not fill up to 2*d+1 and split, but rather, fill up to
+     * be 1 record more than fillFactor full, then "splits" by creating a right
+     * sibling that contains just one record (leaving the original node with
+     * the desired fill factor)
+     */
     // See BPlusNode.bulkLoad.
     @Override
     public Optional<Pair<DataBox, Long>> bulkLoad(Iterator<Pair<DataBox, RecordId>> data,
             float fillFactor) {
         // TODO(proj2): implement
+        int d = metadata.getOrder();
+        while (data.hasNext() && keys.size() < Math.ceil(fillFactor * 2 * d)) {
+            Pair<DataBox, RecordId> record = data.next();
+            DataBox key = record.getFirst();
+            RecordId rid = record.getSecond();
 
+            if (getKey(key).isPresent()) {
+                throw new BPlusTreeException("Duplicate Key");
+            }
+
+            int index = InnerNode.numLessThanEqual(key, keys);
+            keys.add(index, key);
+            rids.add(index, rid);
+        }
+
+        // if the data also has elements, handle it
+        // 当前节点填充到指定比例后仍有剩余数据需要处理的情况
+        if (data.hasNext()) {
+            Pair<DataBox, RecordId> record = data.next();
+            DataBox key = record.getFirst();
+            RecordId rid = record.getSecond();
+
+            if (getKey(key).isPresent()) {
+                throw new BPlusTreeException("Duplicate Key");
+            }
+
+            int i = InnerNode.numLessThanEqual(key, keys);
+            keys.add(i, key);
+            rids.add(i, rid);
+
+            int maxFill = (int) Math.ceil(fillFactor * 2 * d);
+            List<DataBox> leftKey = keys.subList(0, maxFill);
+            // right just has one record
+            List<DataBox> rightKey = keys.subList(maxFill, maxFill + 1);
+            List<RecordId> leftRecord = rids.subList(0, maxFill);
+            List<RecordId> rightRecord = rids.subList(maxFill, maxFill + 1);
+
+            keys = leftKey;
+            rids = leftRecord;
+            LeafNode leafNode = new LeafNode(metadata, bufferManager, rightKey, rightRecord, rightSibling, treeContext);
+            Long pageNum = leafNode.getPage().getPageNum();
+            rightSibling = Optional.of(pageNum);
+            sync();
+
+            Pair<DataBox, Long> pushingPair = new Pair<>(rightKey.get(0), pageNum);
+            return Optional.of(pushingPair);
+        }
+
+        sync();
         return Optional.empty();
     }
 
@@ -180,8 +269,12 @@ class LeafNode extends BPlusNode {
     @Override
     public void remove(DataBox key) {
         // TODO(proj2): implement
-
-        return;
+        int index = keys.indexOf(key);
+        if (index != -1) {
+            keys.remove(index);
+            rids.remove(index);
+            sync();
+        }
     }
 
     // Iterators ///////////////////////////////////////////////////////////////
@@ -377,7 +470,29 @@ class LeafNode extends BPlusNode {
         // use the constructor that reuses an existing page instead of fetching a
         // brand new one.
 
-        return null;
+        Page page = bufferManager.fetchPage(treeContext, pageNum);
+        Buffer buf = page.getBuffer();
+
+        byte nodeType = buf.get();
+        assert (nodeType == (byte) 1);
+
+        List<DataBox> keys = new ArrayList<>();
+        List<RecordId> rids = new ArrayList<>();
+
+        // 处理右兄弟为-1的情况
+        long rightSiblingPageNum = buf.getLong();
+        Optional<Long> rightSibling = (rightSiblingPageNum == -1) ?
+                Optional.empty() : Optional.of(rightSiblingPageNum);
+
+        int n = buf.getInt();
+        // 需要交替读取key和rid,否则会出现数据错位
+        for (int i = 0; i < n; i++) {
+            keys.add(DataBox.fromBytes(buf, metadata.getKeySchema()));
+            rids.add(RecordId.fromBytes(buf));
+        }
+
+        return new LeafNode(metadata, bufferManager, page, keys, rids,
+                rightSibling, treeContext);
     }
 
     // Builtins ////////////////////////////////////////////////////////////////

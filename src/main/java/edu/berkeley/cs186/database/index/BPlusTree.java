@@ -146,8 +146,15 @@ public class BPlusTree {
         LockUtil.ensureSufficientLockHeld(lockContext, LockType.NL);
 
         // TODO(proj2): implement
-
-        return Optional.empty();
+        LeafNode inner = root.get(key);
+        if (inner != null) {
+            return inner.getKey(key);
+        } else {
+            return Optional.empty();
+        }
+        // use this method will cause nullPointerPtrException
+        // because, root.get(key) would be null
+        // return root.get(key).getKey(key);
     }
 
     /**
@@ -202,8 +209,8 @@ public class BPlusTree {
         LockUtil.ensureSufficientLockHeld(lockContext, LockType.NL);
 
         // TODO(proj2): Return a BPlusTreeIterator.
-
-        return Collections.emptyIterator();
+        LeafNode leftNode = root.getLeftmostLeaf();
+        return new BPlusTreeIterator(leftNode, leftNode.scanAll());
     }
 
     /**
@@ -235,7 +242,10 @@ public class BPlusTree {
         LockUtil.ensureSufficientLockHeld(lockContext, LockType.NL);
 
         // TODO(proj2): Return a BPlusTreeIterator.
-
+        if (root != null) {
+            LeafNode leftNode = root.get(key);
+            return new BPlusTreeIterator(leftNode, leftNode.scanGreaterEqual(key));
+        }
         return Collections.emptyIterator();
     }
 
@@ -258,6 +268,20 @@ public class BPlusTree {
         // Use the provided updateRoot() helper method to change
         // the tree's root if the old root splits.
 
+        // Check if the key already exists
+        Optional<Pair<DataBox, Long>> optional = root.put(key, rid);
+        if (optional.isPresent()) {
+            // If the root splits, we need to create a new root
+            List<DataBox> keys = new ArrayList<>();
+            List<Long> child = new ArrayList<>();
+
+            keys.add(optional.get().getFirst());
+            child.add(root.getPage().getPageNum());
+            child.add(optional.get().getSecond());
+
+            InnerNode insertRoot = new InnerNode(metadata, bufferManager, keys, child, lockContext);
+            updateRoot(insertRoot);
+        }
         return;
     }
 
@@ -288,6 +312,24 @@ public class BPlusTree {
         // Note: You should NOT update the root variable directly.
         // Use the provided updateRoot() helper method to change
         // the tree's root if the old root splits.
+        assert(this.root == this.root.getLeftmostLeaf());
+
+        while(data.hasNext()) {
+            Optional<Pair<DataBox, Long>> current = this.root.bulkLoad(data, fillFactor);
+            if (current.isPresent()) {
+                DataBox pushKey = current.get().getFirst();
+                Long rightChild = current.get().getSecond();
+                Long leftChild = root.getPage().getPageNum();
+
+                List<DataBox> keys = new ArrayList<>();
+                keys.add(pushKey);
+                List<Long> children = new ArrayList<>();
+                children.add(leftChild);
+                children.add(rightChild);
+                InnerNode newRoot = new InnerNode(metadata, bufferManager, keys, children, lockContext);
+                updateRoot(newRoot);
+            }
+        }
 
         return;
     }
@@ -309,8 +351,7 @@ public class BPlusTree {
         LockUtil.ensureSufficientLockHeld(lockContext, LockType.NL);
 
         // TODO(proj2): implement
-
-        return;
+        root.remove(key);
     }
 
     // Helpers /////////////////////////////////////////////////////////////////
@@ -420,21 +461,50 @@ public class BPlusTree {
         }
     }
 
+    /**
+     * Splits the root of the B+ tree. The old root is replaced with a new
+     * inner node that has two children: the old root and a new leaf node.
+     */
+    public void splitRoot(DataBox key, Long pageNum) {
+        // Create a new root
+        ArrayList<DataBox> keys = new ArrayList<>();
+        ArrayList<Long> child = new ArrayList<>();
+
+        keys.add(key);
+        child.add(root.getPage().getPageNum());
+        child.add(pageNum);
+
+        // Update the root
+        updateRoot(new InnerNode(metadata, bufferManager, keys, child, lockContext));
+    }
+
     // Iterator ////////////////////////////////////////////////////////////////
     private class BPlusTreeIterator implements Iterator<RecordId> {
         // TODO(proj2): Add whatever fields and constructors you want here.
+        LeafNode node;
+        Iterator<RecordId> iter;
+
+        BPlusTreeIterator(LeafNode leftNode, Iterator<RecordId> leftNodeIter) {
+            this.node = leftNode;
+            this.iter = leftNodeIter;
+        }
 
         @Override
         public boolean hasNext() {
             // TODO(proj2): implement
-
-            return false;
+            return iter.hasNext() || node.getRightSibling().isPresent();
         }
 
         @Override
         public RecordId next() {
             // TODO(proj2): implement
-
+            if (iter.hasNext()) {
+                return iter.next();
+            } else if (node.getRightSibling().isPresent()) {
+                node = node.getRightSibling().get(); // Get the right sibling
+                iter = node.scanAll(); // Scan all the records in the new node
+                return iter.next();
+            }
             throw new NoSuchElementException();
         }
     }
