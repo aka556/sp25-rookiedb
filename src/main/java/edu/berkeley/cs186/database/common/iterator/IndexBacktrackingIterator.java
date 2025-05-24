@@ -35,7 +35,7 @@ public abstract class IndexBacktrackingIterator<T> implements BacktrackingIterat
     @Override
     public boolean hasNext() {
         if (this.nextIndex == -1) this.nextIndex = getNextNonEmpty(nextIndex);
-        return this.nextIndex < this.maxIndex;
+        return this.nextIndex < this.maxIndex; // all index should be less than maxIndex
     }
 
     @Override
