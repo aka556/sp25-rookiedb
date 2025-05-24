@@ -140,7 +140,51 @@ public class SortMergeOperator extends JoinOperator {
          */
         private Record fetchNextRecord() {
             // TODO(proj3_part1): implement
-            return null;
+            while (true) {
+                if (leftRecord == null) return null;
+
+                if (!marked) {
+                    marked = true;
+                    while (compare(leftRecord, rightRecord) > 0 && rightIterator.hasNext()) {
+                        rightRecord = rightIterator.next();
+                    }
+                    while (compare(leftRecord, rightRecord) < 0 && leftIterator.hasNext()) {
+                        leftRecord = leftIterator.next();
+                    }
+                    rightIterator.markPrev();
+                }
+
+                if (compare(leftRecord, rightRecord) == 0) {
+                    Record nextRecord = leftRecord.concat(rightRecord);
+
+                    if (!rightIterator.hasNext()) {
+                        if (!leftIterator.hasNext()) {
+                            leftRecord = null;
+                        } else {
+                            leftRecord = leftIterator.next();
+                        }
+                        rightIterator.reset();
+                        if (rightIterator.hasNext()) {
+                            rightRecord = rightIterator.next();
+                        }
+                    } else {
+                        rightRecord = rightIterator.next();
+                    }
+                    return nextRecord;
+                }
+                else {
+                    marked = false;
+                    if (!leftIterator.hasNext()) {
+                        leftRecord = null;
+                        continue;
+                    }
+                    leftRecord = leftIterator.next();
+                    rightIterator.reset();
+                    if (rightIterator.hasNext()) {
+                        rightRecord = rightIterator.next();
+                    }
+                }
+            }
         }
 
         @Override
