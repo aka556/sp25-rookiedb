@@ -88,6 +88,14 @@ public class BNLJOperator extends JoinOperator {
          */
         private void fetchNextLeftBlock() {
             // TODO(proj3_part1): implement
+            if (leftSourceIterator.hasNext()) {
+                leftBlockIterator = getBlockIterator(
+                        leftSourceIterator,
+                        getLeftSource().getSchema(),
+                        numBuffers - 2);
+                leftBlockIterator.markNext();
+                leftRecord = leftBlockIterator.next();
+            }
         }
 
         /**
@@ -103,6 +111,13 @@ public class BNLJOperator extends JoinOperator {
          */
         private void fetchNextRightPage() {
             // TODO(proj3_part1): implement
+            if (rightSourceIterator.hasNext()) {
+                rightPageIterator = getBlockIterator(
+                        rightSourceIterator,
+                        getRightSource().getSchema(),
+                        1);
+                rightPageIterator.markNext();
+            }
         }
 
         /**
@@ -115,7 +130,49 @@ public class BNLJOperator extends JoinOperator {
          */
         private Record fetchNextRecord() {
             // TODO(proj3_part1): implement
-            return null;
+
+            if (leftRecord == null) {
+                // The left source was empty, nothing to fetch
+                return null;
+            }
+
+            // resolve following 4 cases
+            while (true) {
+                // case1: the right page iterator has a value to yield
+                if (rightPageIterator.hasNext()) {
+                    Record rightRecord = rightPageIterator.next();
+                    if (compare(leftRecord, rightRecord) == 0) {
+                        return leftRecord.concat(rightRecord);
+                    }
+                }
+                // case2: the right page iterator has no value to yield,
+                // but the left block iterator does
+                else if (leftBlockIterator.hasNext()) {
+                    // reset the right page iterator
+                    rightPageIterator.reset();
+                    // set the left record to the next record in the left block
+                    leftRecord = leftBlockIterator.next();
+                }
+                // case3:Neither the right page nor left block iterators have values to yield,
+                // but there's more right pages
+                else if (rightSourceIterator.hasNext()) {
+                    leftBlockIterator.reset();
+                    leftRecord = leftBlockIterator.next();
+                    fetchNextRightPage();
+                }
+                // case4: neither the left block nor right page iterators have values to yield,
+                // but there are still left blocks
+                else if (leftSourceIterator.hasNext()) {
+                    // find the next left block
+                    fetchNextLeftBlock();
+                    // reset the right page iterator
+                    rightSourceIterator.reset();
+                    // find the next right page
+                    fetchNextRightPage();
+                } else {
+                    return null;
+                }
+            }
         }
 
         /**
