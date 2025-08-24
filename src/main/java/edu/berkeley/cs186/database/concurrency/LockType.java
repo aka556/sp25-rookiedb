@@ -22,8 +22,25 @@ public enum LockType {
             throw new NullPointerException("null lock type");
         }
         // TODO(proj4_part1): implement
+        if (a == NL || b == NL) {
+            return true;
+        }
 
-        return false;
+        switch (a) {
+            case IS:
+                return b == IS || b == S || b == IX || b == SIX;
+            case IX:
+                return b == IS || b == IX;
+            case S:
+                return b == IS || b == S;
+            case SIX:
+                return b == IS;
+//            case X:
+//                return false; // X is not compatible with any lock except NL,
+//                which is already handled
+            default:
+                return false;
+        }
     }
 
     /**
@@ -54,8 +71,22 @@ public enum LockType {
             throw new NullPointerException("null lock type");
         }
         // TODO(proj4_part1): implement
+        if (childLockType == NL) {
+            return true;
+        }
 
-        return false;
+        switch (parentLockType) {
+            case IS:
+                return childLockType == IS || childLockType == S;
+            case S:
+                return childLockType == IS;
+            case IX:
+            case X:
+            case SIX:
+                return true;
+            default:
+                return false;
+        }
     }
 
     /**
@@ -69,7 +100,23 @@ public enum LockType {
             throw new NullPointerException("null lock type");
         }
         // TODO(proj4_part1): implement
+        if (substitute == required) {
+            return true;
+        }
 
+        switch (substitute) {
+            case X:
+                return true;
+            case S:
+            case IX:
+                return required == IS || required == NL;
+            case SIX:
+                return required == S || required == IS || required == IX || required == NL;
+            case IS:
+                return required == NL;
+            case NL:
+                return false;
+        }
         return false;
     }
 
