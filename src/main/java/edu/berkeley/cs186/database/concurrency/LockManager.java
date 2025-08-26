@@ -59,7 +59,14 @@ public class LockManager {
          */
         public boolean checkCompatible(LockType lockType, long except) {
             // TODO(proj4_part1): implement
-            return false;
+            for (Lock l : locks) {
+                if (l.transactionNum == except) continue;
+
+                if (!LockType.compatible(l.lockType, lockType)) {
+                    return false;
+                }
+            }
+            return true;
         }
 
         /**
@@ -69,7 +76,14 @@ public class LockManager {
          */
         public void grantOrUpdateLock(Lock lock) {
             // TODO(proj4_part1): implement
-            return;
+            for (Lock l : locks) {
+                if (Objects.equals(l.transactionNum, lock.transactionNum)) {
+                    // find the lock held by the same transaction, update it
+                    l.lockType = lock.lockType;
+                    return;
+                }
+            }
+            this.locks.add(lock);
         }
 
         /**
@@ -78,7 +92,26 @@ public class LockManager {
          */
         public void releaseLock(Lock lock) {
             // TODO(proj4_part1): implement
-            return;
+            locks.removeIf(l -> l.transactionNum.equals(lock.transactionNum)
+                    && l.name.equals(lock.name));
+
+            Iterator<LockRequest> iter = waitingQueue.iterator();
+            while (iter.hasNext()) {
+                LockRequest request = iter.next();
+                if (checkCompatible(request.lock.lockType, request.lock.transactionNum)) {
+                    // 可以授予锁
+                    grantOrUpdateLock(request.lock);
+                    iter.remove(); // 从等待队列中移除
+
+                    // 释放请求中指定的锁
+                    for (Lock toRelease : request.releasedLocks) {
+                        releaseLock(toRelease);
+                    }
+
+                    // 解锁事务
+                    request.transaction.unblock();
+                }
+            }
         }
 
         /**
@@ -87,7 +120,11 @@ public class LockManager {
          */
         public void addToQueue(LockRequest request, boolean addFront) {
             // TODO(proj4_part1): implement
-            return;
+            if (addFront) {
+                waitingQueue.addFirst(request);
+            } else {
+                waitingQueue.addLast(request);
+            }
         }
 
         /**
@@ -99,7 +136,22 @@ public class LockManager {
             Iterator<LockRequest> requests = waitingQueue.iterator();
 
             // TODO(proj4_part1): implement
-            return;
+            while (requests.hasNext()) {
+                LockRequest re = requests.next();
+                if (checkCompatible(re.lock.lockType, re.lock.transactionNum)) {
+                    // 可以授予锁
+                    grantOrUpdateLock(re.lock);
+                    requests.remove(); // 从等待队列中移除
+                    // 释放请求中指定的锁
+                    for (Lock toRelease : re.releasedLocks) {
+                        releaseLock(toRelease);
+                    }
+                    // 唤醒事务
+                    re.transaction.unblock();
+                } else {
+                    break; // 队列中下一个请求无法满足，停止处理
+                }
+            }
         }
 
         /**
@@ -107,7 +159,29 @@ public class LockManager {
          */
         public LockType getTransactionLockType(long transaction) {
             // TODO(proj4_part1): implement
+            for (Lock l : this.locks) {
+                if (l.transactionNum == transaction) {
+                    return l.lockType;
+                }
+            }
             return LockType.NL;
+        }
+
+        /**
+         * Returns the list of locks held by `transaction` on this resource.
+         */
+        public List<Lock> getTransactionLocks(long transaction, ResourceName name) {
+            List<Lock> locks = new ArrayList<>();
+            if (this.locks == null) {
+                return locks;
+            }
+
+            for (Lock lock : this.locks) {
+                if (lock.name.equals(name) && lock.transactionNum == transaction) {
+                    locks.add(lock);
+                }
+            }
+            return locks;
         }
 
         @Override
@@ -160,9 +234,71 @@ public class LockManager {
         // all your code within the given synchronized block and are allowed to
         // move the synchronized block elsewhere if you wish.
         boolean shouldBlock = false;
+        LockRequest request = null;
         synchronized (this) {
-            
+            long transNum = transaction.getTransNum();
+            ResourceEntry targetEntry = getResourceEntry(name);
+            // 1. Error checking
+            // 1.1 DuplicateLockRequestException
+            LockType currentLockType = targetEntry.getTransactionLockType(transNum);
+            if (currentLockType != LockType.NL && !releaseNames.contains(name)) {
+                throw new DuplicateLockRequestException("Transaction " + transNum +
+                        " already has a lock on " + name);
+            }
+
+            // 1.2 NoLockHeldException
+            for (ResourceName r : releaseNames) {
+                ResourceEntry entry = getResourceEntry(r);
+                LockType heldLockType = entry.getTransactionLockType(transNum);
+                if (heldLockType == LockType.NL) {
+                    throw new NoLockHeldException("Transaction " + transNum +
+                            " does not hold a lock on " + r);
+                }
+            }
+
+            // 2. Check if we can grant the lock
+            if (!targetEntry.checkCompatible(lockType, transNum)) {
+                // 2.1 Cannot grant the lock, add to queue and block
+                Lock lock = new Lock(name, lockType, transNum);
+                List<Lock> releasedLocks = new ArrayList<>();
+                for (ResourceName rn : releaseNames) {
+                    releasedLocks.addAll(getResourceEntry(rn).getTransactionLocks(transNum, rn));
+                }
+
+                request = new LockRequest(transaction, lock, releasedLocks);
+                targetEntry.addToQueue(request, true); // add to front of queue
+                shouldBlock = true;
+            } else {
+                Lock newLock = new Lock(name, lockType, transNum);
+                targetEntry.grantOrUpdateLock(newLock);
+                transactionLocks.computeIfAbsent(transNum, k -> new ArrayList<>()).add(newLock);
+
+                // 释放旧锁
+                for (ResourceName r : releaseNames) {
+                    if (r.equals(name)) continue;
+
+                    ResourceEntry entry = getResourceEntry(r);
+                    Lock toRelease = null;
+                    for (Lock l : entry.locks) {
+                        if (l.transactionNum == transNum) {
+                            toRelease = l;
+                            break;
+                        }
+                    }
+                    if (toRelease != null) {
+                        entry.releaseLock(toRelease);
+                        transactionLocks.get(transNum).remove(toRelease);
+                    }
+                }
+            }
+
+            // 3. 如果需要阻塞，准备阻塞
+            if (shouldBlock) {
+                transaction.prepareBlock();
+            }
         }
+
+        // 同步块外阻塞
         if (shouldBlock) {
             transaction.block();
         }
@@ -187,8 +323,39 @@ public class LockManager {
         // synchronized block elsewhere if you wish.
         boolean shouldBlock = false;
         synchronized (this) {
-            
+            // error checking
+            long transNum = transaction.getTransNum();
+            ResourceEntry entry = getResourceEntry(name);
+
+            // 检查是否已经持有锁
+            for (Lock l : entry.locks) {
+                if (l.transactionNum.equals(transNum)) {
+                    throw new DuplicateLockRequestException("Transaction " + transNum +
+                            " already has a lock on " + name);
+                }
+            }
+
+            // 检查是否兼容
+            boolean compatible = entry.checkCompatible(lockType, transNum);
+
+            // 已有等待队列或不兼容
+            if (!compatible || !entry.waitingQueue.isEmpty()) {
+                shouldBlock = true; // 阻塞
+                // 加入末尾
+                LockRequest request = new LockRequest(transaction, new Lock(name, lockType, transNum));
+                entry.waitingQueue.addLast(request);
+                transaction.prepareBlock();
+            } else {
+                // 授予锁
+                Lock newLock = new Lock(name, lockType, transNum);
+                entry.grantOrUpdateLock(newLock);
+
+                // 更新事务--锁映射
+                transactionLocks.putIfAbsent(transNum, new ArrayList<>());
+                transactionLocks.get(transNum).add(newLock);
+            }
         }
+
         if (shouldBlock) {
             transaction.block();
         }
@@ -209,7 +376,30 @@ public class LockManager {
         // TODO(proj4_part1): implement
         // You may modify any part of this method.
         synchronized (this) {
-            
+            // error checking
+            long transNum = transaction.getTransNum();
+            ResourceEntry entry = getResourceEntry(name);
+            Lock heldLock = null;
+            for (Lock l : entry.locks) {
+                if (l.transactionNum.equals(transNum)) {
+                    heldLock = l;
+                    break;
+                }
+            }
+
+            if (heldLock == null) {
+                throw new NoLockHeldException("Transaction " + transNum +
+                        " does not hold a lock on " + name);
+            }
+
+            // 释放锁
+            entry.locks.remove(heldLock);
+
+            // 全局释放该锁
+            transactionLocks.get(transNum).remove(heldLock);
+
+            // 处理等待队列
+            entry.processQueue();
         }
     }
 
@@ -241,8 +431,66 @@ public class LockManager {
         // You may modify any part of this method.
         boolean shouldBlock = false;
         synchronized (this) {
-            
+            // error checking
+            // 1. 检查是否持有锁
+            long transNum = transaction.getTransNum();
+            ResourceEntry entry = getResourceEntry(name);
+            LockType currentLockType = entry.getTransactionLockType(transNum);
+
+            // 已有相同类型的锁
+            if (currentLockType.equals(newLockType)) {
+                throw new DuplicateLockRequestException("Transaction " + transNum +
+                        " already has a lock of type " + newLockType + " on " + name);
+            }
+
+            // 没有持有锁
+            if (currentLockType == LockType.NL) {
+                throw new NoLockHeldException("Transaction " + transNum +
+                        " does not hold a lock on " + name);
+            }
+
+            // 不是升级
+            if (!LockType.substitutable(newLockType, currentLockType)) {
+                throw new InvalidLockException("Cannot promote lock from " +
+                        currentLockType + " to " + newLockType);
+            }
+
+            // 不允许升级成SIX锁
+            if (newLockType.equals(LockType.SIX)) {
+                acquireAndRelease(transaction, name, newLockType,
+                        Collections.singletonList(name));
+            }
+
+            // 检查是否兼容
+            if (!entry.checkCompatible(newLockType, transNum)) {
+                // 不能兼容，加入等待队列
+                shouldBlock = true;
+                LockRequest request = new LockRequest(transaction,
+                        new Lock(name, newLockType, transNum),
+                        Collections.emptyList());
+                entry.addToQueue(request, true); // 加入队列头
+                transaction.prepareBlock(); // 准备阻塞
+            } else {
+                // 可以兼容，直接升级
+                for (Lock l : entry.locks) {
+                    if (l.transactionNum == transNum) {
+                        l.lockType = newLockType;
+                        break;
+                    }
+                }
+
+                // 更新全局映射
+                List<Lock> locks = transactionLocks.get(transNum);
+                for (Lock l : locks) {
+                    if (l.name.equals(name)) {
+                        l.lockType = newLockType;
+                        break;
+                    }
+                }
+            }
         }
+
+        // 同步块外阻塞
         if (shouldBlock) {
             transaction.block();
         }
@@ -255,6 +503,12 @@ public class LockManager {
     public synchronized LockType getLockType(TransactionContext transaction, ResourceName name) {
         // TODO(proj4_part1): implement
         ResourceEntry resourceEntry = getResourceEntry(name);
+        long transNum = transaction.getTransNum();
+        for (Lock l : resourceEntry.locks) {
+            if (l.transactionNum == transNum) {
+                return l.lockType;
+            }
+        }
         return LockType.NL;
     }
 
